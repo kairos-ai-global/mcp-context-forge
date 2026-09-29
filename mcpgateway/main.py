@@ -11561,6 +11561,15 @@ async def _handle_rpc_authenticated(request: Request, db: Session, user):
                 if not _trusted_internal_mcp_dispatch:
                     # /rpc is a 2025-era wire; an owner-worker dispatch is internal and keeps the value for the originating worker
                     result = _object_only_structured_content(result)
+            except (ToolInvocationError, PluginViolationError) as exc:
+                # A failed or policy-blocked tool call is reported in the result with
+                # isError, so the model sees the reason (MCP spec, tools error handling),
+                # matching call_tool in the streamable HTTP transport. Session affinity
+                # reroutes /servers/<id>/mcp tool calls here, so both paths must agree.
+                # Protocol errors remain for malformed requests, unknown tools and
+                # plugins that crash (PluginError).
+                logger.info("tools/call failed for %s: %s", params.get("name") if isinstance(params, dict) else None, exc)
+                result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
             finally:
                 # Release transaction after tools/call completes
                 db.commit()
