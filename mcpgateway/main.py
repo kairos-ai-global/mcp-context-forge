@@ -215,7 +215,7 @@ from mcpgateway.services.prompt_service import PromptError, PromptLockConflictEr
 from mcpgateway.services.resource_service import ResourceError, ResourceLockConflictError, ResourceNotFoundError, ResourceURIConflictError, ResourceValidationError
 from mcpgateway.services.server_service import ServerError, ServerLockConflictError, ServerNameConflictError, ServerNotFoundError
 from mcpgateway.services.tag_service import TagService
-from mcpgateway.services.tool_service import ToolError, ToolLockConflictError, ToolNameConflictError, ToolNotFoundError
+from mcpgateway.services.tool_service import ToolError, ToolInvocationError, ToolLockConflictError, ToolNameConflictError, ToolNotFoundError
 from mcpgateway.transports.sse_transport import SSETransport
 from mcpgateway.transports.streamablehttp_transport import (
     _validate_streamable_session_access,
@@ -11679,6 +11679,15 @@ async def _handle_rpc_authenticated(request: Request, db: Session, user):
                     lowered_request_headers=_lowered_request_headers(),
                     server_id=server_id,
                 )
+            except (ToolInvocationError, PluginViolationError) as exc:
+                # A failed or policy-blocked tool call is reported in the result with
+                # isError, so the model sees the reason (MCP spec, tools error handling),
+                # matching call_tool in the streamable HTTP transport. Session affinity
+                # reroutes /servers/<id>/mcp tool calls here, so both paths must agree.
+                # Protocol errors remain for malformed requests, unknown tools and
+                # plugins that crash (PluginError).
+                logger.info("tools/call failed for %s: %s", params.get("name") if isinstance(params, dict) else None, exc)
+                result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
             finally:
                 # Release transaction after tools/call completes
                 db.commit()
