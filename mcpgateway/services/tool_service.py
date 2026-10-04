@@ -99,7 +99,7 @@ from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
 from mcpgateway.services.token_exchange_cache import TokenExchangeCache
 from mcpgateway.services.upstream_session_registry import downstream_session_id_from_request_context, get_upstream_session_registry, RegistryNotInitializedError, TransportType
-from mcpgateway.transports.context import UserContext
+from mcpgateway.transports.context import user_identity_var, UserContext
 from mcpgateway.utils.admin_check import is_admin_bypass_granted, is_user_admin
 from mcpgateway.utils.correlation_id import get_correlation_id
 from mcpgateway.utils.create_slug import build_gateway_tool_invocation_name, slugify
@@ -6197,10 +6197,14 @@ class ToolService(BaseService):
                                 "[AFFINITY] Worker %s | Session %s... | Tool: %s | Normalized MCP-Session-Id → x-mcp-session-id for pool affinity (MCP transport)", worker_id, session_short, name
                             )
 
-                    # Inject identity propagation headers and meta for MCP tools
-                    if global_context and global_context.user_context:
-                        headers.update(build_identity_headers(global_context.user_context))
-                        meta_data = build_identity_meta(global_context.user_context, meta_data)
+                    # Inject identity propagation headers and meta for MCP tools.
+                    # Callers authenticated with an OAuth access token have no plugin
+                    # user_context, so fall back to the identity the transport
+                    # recorded for this request.
+                    identity = (global_context.user_context if global_context else None) or user_identity_var.get()
+                    if identity:
+                        headers.update(build_identity_headers(identity))
+                        meta_data = build_identity_meta(identity, meta_data)
 
                     # mTLS client cert/key: resolve from payload, then override with runtime gateway if available
                     client_cert_from_payload = gateway_payload.get("client_cert") if has_gateway else None

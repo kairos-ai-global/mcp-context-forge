@@ -6455,6 +6455,10 @@ class _StreamableHttpAuthHandler:
                 "auth_method": "oauth_access_token",
             }
         )
+        # Record the caller's identity for propagation to upstream MCP servers,
+        # as the JWT and proxy branches do; without it OAuth callers reach
+        # upstreams as anonymous.
+        _set_user_identity_from_dict(user_context_var.get())
         _oauth_checked_var.set(True)
         return OAuthAuthResult.SUCCESS
 

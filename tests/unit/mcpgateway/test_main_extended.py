@@ -771,6 +771,26 @@ class TestInternalMcpHelperCoverage:
         assert forwarded["is_admin"] is True
         assert request.state.token_teams == ["team-a"]
 
+    def test_build_internal_mcp_forwarded_user_records_identity_for_propagation(self):
+        """An affinity-forwarded call keeps the authenticated caller's identity for propagation."""
+        # First-Party
+        from mcpgateway.transports.context import user_identity_var
+
+        request = MagicMock(spec=Request)
+        request.headers = _trusted_internal_mcp_headers({"email": "fwd@example.com", "teams": ["team-a"], "is_authenticated": True, "is_admin": False, "auth_method": "oauth_access_token"})
+        request.client = SimpleNamespace(host="127.0.0.1")
+        request.state = SimpleNamespace()
+
+        token = user_identity_var.set(None)
+        try:
+            _build_internal_mcp_forwarded_user(request)
+            identity = user_identity_var.get()
+            assert identity is not None and identity.email == "fwd@example.com"
+            assert identity.teams == ["team-a"]
+            assert identity.auth_method == "oauth_access_token"
+        finally:
+            user_identity_var.reset(token)
+
     def test_build_internal_mcp_forwarded_user_sets_trace_context(self):
         """Trusted forwarded auth should populate trace context for downstream spans."""
         # First-Party

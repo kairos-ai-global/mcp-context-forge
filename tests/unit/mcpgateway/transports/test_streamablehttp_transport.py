@@ -15197,6 +15197,46 @@ async def test_oauth_access_token_context_preserves_exp(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oauth_access_token_records_identity_for_propagation(monkeypatch):
+    """An OAuth access-token caller's identity is recorded for propagation to upstreams."""
+    # First-Party
+    from mcpgateway.transports.context import user_identity_var
+
+    mock_server = MagicMock()
+    mock_server.oauth_enabled = True
+    mock_server.oauth_config = {
+        "authorization_servers": ["https://issuer.example.com"],
+        "resource": "https://gateway.example.com/servers/oauth-server/mcp",
+    }
+    mock_db = MagicMock()
+    mock_db.execute.return_value.scalar_one_or_none.return_value = mock_server
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.get_db", _make_fake_get_db(mock_db))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.verify_oauth_access_token", AsyncMock(return_value={"email": "oauth-user@example.com", "exp": 1_800_000_000}))
+    monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport._persist_learned_server_audience", MagicMock())
+
+    mock_user = MagicMock()
+    mock_user.is_active = True
+    mock_user.is_admin = False
+    monkeypatch.setattr("mcpgateway.auth._get_user_by_email_sync", MagicMock(return_value=mock_user))
+    monkeypatch.setattr("mcpgateway.auth._resolve_teams_from_db", AsyncMock(return_value=["team-a"]))
+
+    token = user_identity_var.set(None)
+    try:
+        scope = _make_scope("/servers/oauth-server/mcp")
+        handler = tr._StreamableHttpAuthHandler(scope=scope, receive=AsyncMock(), send=AsyncMock(), request_path="/servers/oauth-server/mcp")
+        result = await handler._try_oauth_access_token("oauth-token", {"iss": "https://issuer.example.com"})
+
+        assert result is tr.OAuthAuthResult.SUCCESS
+        identity = user_identity_var.get()
+        assert identity is not None
+        assert identity.email == "oauth-user@example.com"
+        assert identity.teams == ["team-a"]
+        assert identity.auth_method == "oauth_access_token"
+    finally:
+        user_identity_var.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_auth_returns_503_on_db_failure(monkeypatch):
     """Middleware returns 503 when DB is unavailable (OAuthEnforcementUnavailableError)."""
     # Third-Party
