@@ -1722,3 +1722,107 @@ async def delete_registered_client(client_id: str, request: Request, current_use
         logger.error(f"Failed to delete registered client {client_id}: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to delete registered client")
+
+
+# ---------------------------------------------------------------------------
+# The caller's own per-user OAuth connections (Kairos carried patch 4).
+#
+# ContextForge stores one token per (gateway, person) but gives the person no
+# way to see which systems they connected or to disconnect one. Both routes act
+# only on the caller's own tokens, only for gateways the caller may access (the
+# same check /oauth/authorize uses), and never return token values.
+# Provider-side revocation (RFC 7009) is not attempted; see #5501.
+# ---------------------------------------------------------------------------
+
+
+def _is_per_user_oauth(gateway: Gateway) -> bool:
+    """Return True when a gateway stores one OAuth token per person.
+
+    Args:
+        gateway: Gateway record.
+
+    Returns:
+        True for OAuth gateways using the authorization_code grant.
+
+    Examples:
+        >>> from types import SimpleNamespace
+        >>> _is_per_user_oauth(SimpleNamespace(auth_type="oauth", oauth_config={"grant_type": "authorization_code"}))
+        True
+        >>> _is_per_user_oauth(SimpleNamespace(auth_type="oauth", oauth_config={"grant_type": "client_credentials"}))
+        False
+        >>> _is_per_user_oauth(SimpleNamespace(auth_type="bearer", oauth_config=None))
+        False
+    """
+    config = gateway.oauth_config or {}
+    return gateway.auth_type == "oauth" and config.get("grant_type") == "authorization_code"
+
+
+@oauth_router.get("/connections")
+async def list_my_oauth_connections(
+    request: Request,
+    current_user: EmailUserResponse = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """List the caller's own connections to per-user OAuth gateways they may access.
+
+    Args:
+        request: The FastAPI request object.
+        current_user: The authenticated caller.
+        db: Database session.
+
+    Returns:
+        ``{"connections": [...]}``, one entry per gateway, without token values.
+    """
+    email = get_user_email(current_user)
+    storage = TokenStorageService(db)
+    connections = []
+    for gateway in db.execute(select(Gateway).where(Gateway.enabled.is_(True))).scalars().all():
+        if not _is_per_user_oauth(gateway):
+            continue
+        try:
+            await _enforce_gateway_access(gateway.id, gateway, current_user, db, request=request)
+        except HTTPException:
+            continue
+        info = await storage.get_token_info(gateway.id, email)
+        connections.append(
+            {
+                "gateway_id": gateway.id,
+                "name": gateway.name,
+                "description": gateway.description,
+                "connected": info is not None,
+                "token_status": (info or {}).get("status"),
+                "scopes": (info or {}).get("scopes"),
+                "expires_at": (info or {}).get("expires_at"),
+                "updated_at": (info or {}).get("updated_at"),
+            }
+        )
+    return {"connections": connections}
+
+
+@oauth_router.delete("/connections/{gateway_id}")
+async def revoke_my_oauth_connection(
+    gateway_id: str,
+    request: Request,
+    current_user: EmailUserResponse = Depends(get_current_user_with_permissions),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Delete the caller's own stored token for one per-user OAuth gateway.
+
+    Args:
+        gateway_id: The gateway to disconnect.
+        request: The FastAPI request object.
+        current_user: The authenticated caller.
+        db: Database session.
+
+    Returns:
+        ``{"gateway_id": ..., "revoked": bool}``.
+
+    Raises:
+        HTTPException: 404 if the gateway does not exist or is not a per-user OAuth gateway.
+    """
+    gateway = db.execute(select(Gateway).where(Gateway.id == gateway_id)).scalar_one_or_none()
+    if not gateway or not _is_per_user_oauth(gateway):
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    await _enforce_gateway_access(gateway_id, gateway, current_user, db, request=request)
+    revoked = await TokenStorageService(db).revoke_user_tokens(gateway_id, get_user_email(current_user))
+    return {"gateway_id": gateway_id, "revoked": bool(revoked)}
