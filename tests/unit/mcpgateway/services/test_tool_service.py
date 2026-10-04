@@ -195,6 +195,21 @@ def reset_tool_lookup_cache():
     tool_lookup_cache.invalidate_all_local()
 
 
+@pytest.fixture(autouse=True)
+def reset_user_identity_var():
+    """Start every test without a propagated identity.
+
+    invoke_tool falls back to user_identity_var when there is no plugin
+    user_context, and other modules' tests may leave it set.
+    """
+    # First-Party
+    from mcpgateway.transports.context import user_identity_var
+
+    token = user_identity_var.set(None)
+    yield
+    user_identity_var.reset(token)
+
+
 @pytest.fixture
 def mock_global_config_obj():
     """Create a mock GlobalConfig object for tests.
@@ -3226,6 +3241,94 @@ class TestToolService:
 
         # ----------------------------------------
         # Now, simulate the actual method call
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_identity", [True, False])
+    async def test_invoke_tool_mcp_propagates_transport_identity_without_plugin_context(self, tool_service, mock_tool, test_db, has_identity):
+        """Without a plugin user_context (OAuth access-token callers), the identity recorded by the transport is propagated."""
+        # Standard
+        from types import SimpleNamespace
+
+        # First-Party
+        from mcpgateway.transports.context import user_identity_var, UserContext
+
+        mock_gateway = SimpleNamespace(
+            id="42",
+            name="test_gateway",
+            slug="test-gateway",
+            url="http://fake-mcp:8080/mcp",
+            enabled=True,
+            deprecated=False,
+            reachable=True,
+            auth_type="bearer",
+            auth_value="Bearer abc123",
+            capabilities={"tools": {"listChanged": True}},
+            transport="STREAMABLEHTTP",
+            passthrough_headers=[],
+        )
+        mock_tool.integration_type = "MCP"
+        mock_tool.request_type = "StreamableHTTP"
+        mock_tool.jsonpath_filter = ""
+        mock_tool.auth_type = None
+        mock_tool.auth_value = None
+        mock_tool.original_name = "dummy_tool"
+        mock_tool.headers = {}
+        mock_tool.name = "test-gateway-dummy-tool"
+        mock_tool.gateway_slug = "test-gateway"
+        mock_tool.gateway_id = mock_gateway.id
+
+        returns = [mock_tool, mock_gateway, mock_gateway]
+
+        def execute_side_effect(*_args, **_kwargs):
+            value = returns.pop(0) if returns else None
+            m = Mock()
+            m.scalar_one_or_none.return_value = value
+            m.scalars.return_value = m
+            m.all.return_value = [] if value is None else [value]
+            return m
+
+        test_db.execute = Mock(side_effect=execute_side_effect)
+
+        session_mock = AsyncMock()
+        session_mock.initialize = AsyncMock()
+        session_mock.call_tool = AsyncMock(return_value=ToolResult(content=[TextContent(type="text", text="MCP response")]))
+        client_session_cm = AsyncMock()
+        client_session_cm.__aenter__.return_value = session_mock
+        client_session_cm.__aexit__.return_value = AsyncMock()
+
+        seen_headers = {}
+
+        @asynccontextmanager
+        async def mock_streamable_client(*_args, **kwargs):
+            seen_headers.update(kwargs.get("headers") or {})
+            yield ("read", "write", None)
+
+        identity = UserContext(user_id="oauth-user@example.com", email="oauth-user@example.com", auth_method="oauth_access_token") if has_identity else None
+        build_headers = Mock(return_value={"X-Test-Identity": "oauth-user@example.com"})
+        build_meta = Mock(side_effect=lambda _uc, meta: meta)
+
+        token = user_identity_var.set(identity)
+        try:
+            with (
+                patch("mcpgateway.services.tool_service.streamablehttp_client", mock_streamable_client),
+                patch("mcpgateway.services.tool_service.ClientSession", return_value=client_session_cm),
+                patch("mcpgateway.services.tool_service.decode_auth", return_value={"Authorization": "Bearer xyz"}),
+                patch("mcpgateway.services.tool_service.extract_using_jq", side_effect=lambda data, _filt: data),
+                patch("mcpgateway.services.tool_service.build_identity_headers", build_headers),
+                patch("mcpgateway.services.tool_service.build_identity_meta", build_meta),
+            ):
+                result = await tool_service.invoke_tool(test_db, "dummy_tool", {"param": "value"}, request_headers=None)
+        finally:
+            user_identity_var.reset(token)
+
+        assert result.content[0].text == "MCP response"
+        if has_identity:
+            build_headers.assert_called_once_with(identity)
+            build_meta.assert_called_once()
+            assert seen_headers.get("X-Test-Identity") == "oauth-user@example.com"
+        else:
+            build_headers.assert_not_called()
+            assert "X-Test-Identity" not in seen_headers
 
     @pytest.mark.asyncio
     async def test_invoke_tool_streamablehttp_falls_back_when_registry_not_initialized(self, tool_service, mock_tool, test_db):

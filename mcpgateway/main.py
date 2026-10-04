@@ -218,6 +218,7 @@ from mcpgateway.services.tag_service import TagService
 from mcpgateway.services.tool_service import ToolError, ToolInvocationError, ToolLockConflictError, ToolNameConflictError, ToolNotFoundError
 from mcpgateway.transports.sse_transport import SSETransport
 from mcpgateway.transports.streamablehttp_transport import (
+    _set_user_identity_from_dict,
     _validate_streamable_session_access,
     get_streamable_http_auth_context,
     SessionManagerWrapper,
@@ -436,6 +437,11 @@ def _build_internal_mcp_forwarded_user(request: Request) -> Dict[str, Any]:
     _validate_internal_mcp_auth_context(auth_context)
 
     setattr(request.state, "_mcp_internal_auth_context", auth_context)
+
+    # A call forwarded by session affinity must keep the caller's identity for
+    # propagation to upstream MCP servers, like a call received directly.
+    if auth_context.get("email") and auth_context.get("is_authenticated") is not False:
+        _set_user_identity_from_dict(auth_context)
 
     if "teams" in auth_context and (auth_context["teams"] is None or isinstance(auth_context["teams"], list)):
         request.state.token_teams = auth_context["teams"]
