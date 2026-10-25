@@ -1420,7 +1420,7 @@ class TestOAuthManager:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        with patch.object(manager, "_get_client", return_value=mock_client):
+        with patch("mcpgateway.services.oauth_manager.get_isolated_http_client", _isolated_client(mock_client)):
             await manager.refresh_token("old_refresh_token", credentials)
 
         sent = mock_client.post.call_args[1]["data"]
@@ -1438,7 +1438,7 @@ class TestOAuthManager:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        with patch.object(manager, "_get_client", return_value=mock_client):
+        with patch("mcpgateway.services.oauth_manager.get_isolated_http_client", _isolated_client(mock_client)):
             await manager.refresh_token("old_refresh_token", credentials)
 
         assert "scope" not in mock_client.post.call_args[1]["data"]
