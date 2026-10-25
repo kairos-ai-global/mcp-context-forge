@@ -3499,6 +3499,7 @@ class TestToolService:
         session_mock = AsyncMock()
         session_mock.initialize = AsyncMock()
         session_mock.call_tool = AsyncMock(return_value=ToolResult(content=[TextContent(type="text", text="MCP response")]))
+        session_mock.session.call_tool = session_mock.call_tool
         client_session_cm = AsyncMock()
         client_session_cm.__aenter__.return_value = session_mock
         client_session_cm.__aexit__.return_value = AsyncMock()
@@ -3508,7 +3509,7 @@ class TestToolService:
         @asynccontextmanager
         async def mock_streamable_client(*_args, **kwargs):
             seen_headers.update(kwargs.get("headers") or {})
-            yield ("read", "write", None)
+            yield session_mock
 
         identity = UserContext(user_id="oauth-user@example.com", email="oauth-user@example.com", auth_method="oauth_access_token") if has_identity else None
         build_headers = Mock(return_value={"X-Test-Identity": "oauth-user@example.com"})
@@ -3517,8 +3518,7 @@ class TestToolService:
         token = user_identity_var.set(identity)
         try:
             with (
-                patch("mcpgateway.services.tool_service.streamablehttp_client", mock_streamable_client),
-                patch("mcpgateway.services.tool_service.ClientSession", return_value=client_session_cm),
+                patch("mcpgateway.services.tool_service.mcp_proxy_client", mock_streamable_client),
                 patch("mcpgateway.services.tool_service.decode_auth", return_value={"Authorization": "Bearer xyz"}),
                 patch("mcpgateway.services.tool_service.extract_using_jq", side_effect=lambda data, _filt: data),
                 patch("mcpgateway.services.tool_service.build_identity_headers", build_headers),
